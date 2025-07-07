@@ -1,0 +1,28 @@
+syntax = "proto3";
+
+package payment;
+
+// Payment service definition
+service Payment {
+  // Process a payment charge
+  rpc Charge (ChargeRequest) returns (ChargeResponse) {}
+}
+
+// The request message containing payment details
+message ChargeRequest {
+  string order_id = 1;
+  double amount = 2;
+  string currency = 3;
+}
+
+// The response message containing payment status
+message ChargeResponse {
+  enum Status {
+    APPROVED = 0;
+    DECLINED = 1;
+    ERROR = 2;
+  }
+  Status status = 1;
+  string transaction_id = 2;
+  string message = 3;
+}

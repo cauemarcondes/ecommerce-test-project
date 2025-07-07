@@ -1,0 +1,63 @@
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+  
+  # Tail sampling processor: keep all error traces + 10% of normal traces
+  tail_sampling:
+    decision_wait: 5s
+    num_traces: 100
+    expected_new_traces_per_sec: 10
+    policies:
+      [
+        {
+          name: errors,
+          type: status_code,
+          status_code: {status_codes: [ERROR]}
+        },
+        {
+          name: sample_10pct,
+          type: probabilistic,
+          probabilistic: {sampling_percentage: 10}
+        }
+      ]
+
+exporters:
+  logging:
+    verbosity: basic
+  
+  elasticsearch:
+    endpoints: ["http://elasticsearch:9200"]
+    index: traces-otel
+    
+  otlp/elastic:
+    endpoint: elasticsearch:8200
+    tls:
+      insecure: true
+
+service:
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [batch, tail_sampling]
+      exporters: [elasticsearch, otlp/elastic, logging]
+    metrics:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [logging]
+    logs:
+      receivers: [otlp]
+      processors: [batch]
+      exporters: [logging]
+
+  telemetry:
+    logs:
+      level: debug

@@ -1,0 +1,136 @@
+version: '3.8'
+
+services:
+  # Infrastructure services
+  elasticsearch:
+    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+    environment:
+      - discovery.type=single-node
+      - xpack.security.enabled=false
+      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+    ports:
+      - "7200:9200"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9200"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - es-data:/usr/share/elasticsearch/data
+
+  rabbitmq:
+    image: rabbitmq:3.13-management
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    healthcheck:
+      test: ["CMD", "rabbitmqctl", "status"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+    volumes:
+      - rabbitmq-data:/var/lib/rabbitmq
+
+  # otel-collector:
+  #   image: otel/opentelemetry-collector-contrib:0.101.0
+  #   command: ["--config=/etc/otel-collector-config.yaml"]
+  #   volumes:
+  #     - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
+  #   ports:
+  #     - "4317:4317"  # OTLP gRPC
+  #     - "4318:4318"  # OTLP HTTP
+  #   depends_on:
+  #     elasticsearch:
+  #       condition: service_healthy
+
+  # Application services
+  api-gateway:
+    build:
+      context: ./api-gateway
+      dockerfile: Dockerfile
+    environment:
+      - PORT=3000
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4318
+      - OTEL_SERVICE_NAME=api-gateway
+      - SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
+      - CATALOG_SVC_URL=http://catalog-svc:8080
+      - ORDER_SVC_URL=http://order-svc:8081
+    ports:
+      - "3000:3000"
+    depends_on:
+      - catalog-svc
+      - order-svc
+    volumes:
+      - ./api-gateway:/app
+      - /app/node_modules
+
+  catalog-svc:
+    build:
+      context: ./catalog-svc
+      dockerfile: Dockerfile
+    environment:
+      - PORT=8080
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317
+      - OTEL_SERVICE_NAME=catalog-svc
+      - SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+    volumes:
+      - ./catalog-svc:/app
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+
+  order-svc:
+    build:
+      context: ./order-svc
+      dockerfile: Dockerfile
+    environment:
+      - PORT=8081
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4318
+      - OTEL_SERVICE_NAME=order-svc
+      - SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - RABBITMQ_URL=amqp://rabbitmq:5672
+      - PAYMENT_SVC_URL=payment-svc:9000
+    volumes:
+      - ./order-svc:/app
+      - /app/node_modules
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+  payment-svc:
+    build:
+      context: ./payment-svc
+      dockerfile: Dockerfile
+    environment:
+      - PORT=9000
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317
+      - OTEL_SERVICE_NAME=payment-svc
+      - SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
+    volumes:
+      - ./payment-svc:/app
+
+  email-worker:
+    build:
+      context: ./email-worker
+      dockerfile: Dockerfile
+    environment:
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317
+      - OTEL_SERVICE_NAME=email-worker
+      - SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
+      - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - RABBITMQ_URL=amqp://rabbitmq:5672
+    volumes:
+      - ./email-worker:/app
+    depends_on:
+      elasticsearch:
+        condition: service_healthy
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  es-data:
+  rabbitmq-data:
