@@ -23,6 +23,7 @@
     "@opentelemetry/sdk-trace-node": "^1.18.1",
     "@opentelemetry/semantic-conventions": "^1.18.1",
     "pino": "^8.16.2",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "elastic-apm-node": "^4.4.0"
   }
 }

@@ -1,18 +1,20 @@
 'use strict';
+const { apmProvider, loadInstrumentation } = require('./instrumentation-switch');
 
-// Load OpenTelemetry instrumentation first
-require('./instrumentation');
+const SERVICE_NAME = process.env.OTEL_SERVICE_NAME || 'catalog-svc';
+const { trace, context } = loadInstrumentation(SERVICE_NAME)
+
+console.log(`Catalog Service using ${apmProvider} instrumentation`);
 
 const express = require('express');
 const { Client } = require('@elastic/elasticsearch');
-const { trace, context, SpanStatusCode } = require('@opentelemetry/api');
+const { SpanStatusCode } = require('@opentelemetry/api');
 const pino = require('pino');
 const pinoHttp = require('pino-http');
 
 // Environment variables
 const PORT = process.env.PORT || 8080;
 const ELASTICSEARCH_URL = process.env.ELASTICSEARCH_URL || 'http://elasticsearch:9200';
-const SERVICE_NAME = process.env.OTEL_SERVICE_NAME || 'catalog-svc';
 const SERVICE_VERSION = process.env.SERVICE_VERSION || '0.1.0';
 const ES_INDEX = 'catalog';
 
@@ -130,16 +132,15 @@ app.use(pinoHttp({
     return 'info';
   },
   // Add custom props to each log
-  customProps: function (req, res) {
-    const span = trace.getSpan(context.active());
-    if (span) {
-      const spanContext = span.spanContext();
-      return {
-        trace: { id: spanContext.traceId },
-        span: { id: spanContext.spanId }
-      };
-    }
-    return {};
+  mixin() {
+    const span = trace.getActiveSpan();
+    if (!span) return {};
+
+    const { traceId, spanId } = trace.getActiveSpan().spanContext();
+    return {
+      trace: { id: traceId },
+      span: { id: spanId }
+    };
   }
 }));
 

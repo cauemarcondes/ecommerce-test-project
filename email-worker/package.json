@@ -23,6 +23,7 @@
     "@opentelemetry/semantic-conventions": "^1.18.1",
     "amqplib": "^0.10.3",
     "nodemailer": "^6.9.7",
-    "pino": "^8.16.2"
+    "pino": "^8.16.2",
+    "elastic-apm-node": "^4.4.0"
   }
 }

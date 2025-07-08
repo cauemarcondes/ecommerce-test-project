@@ -49,10 +49,18 @@ services:
       context: ./api-gateway
       dockerfile: Dockerfile
     environment:
+      # Instrumentation switch: 'otel' or 'elastic'
+      - APM_PROVIDER=${APM_PROVIDER:-otel}
+      # OpenTelemetry settings
       - PORT=3000
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4318
       - OTEL_SERVICE_NAME=api-gateway
       - SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
+      # Elastic APM settings
+      - ELASTIC_APM_SERVER_URL=${ELASTIC_APM_SERVER_URL:-http://host.docker.internal:8200}
+      - ELASTIC_APM_SERVICE_NAME=api-gateway
+      - ELASTIC_APM_SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
+      # Service URLs
       - CATALOG_SVC_URL=http://catalog-svc:8080
       - ORDER_SVC_URL=http://order-svc:8081
     ports:
@@ -69,11 +77,17 @@ services:
       context: ./catalog-svc
       dockerfile: Dockerfile
     environment:
+     # Instrumentation switch: 'otel' or 'elastic'
+      - APM_PROVIDER=${APM_PROVIDER:-otel}
       - PORT=8080
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317
       - OTEL_SERVICE_NAME=catalog-svc
       - SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
       - ELASTICSEARCH_URL=http://elasticsearch:9200
+      # Elastic APM settings
+      - ELASTIC_APM_SERVER_URL=${ELASTIC_APM_SERVER_URL:-http://host.docker.internal:8200}
+      - ELASTIC_APM_SERVICE_NAME=catalog-svc
+      - ELASTIC_APM_SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
     volumes:
       - ./catalog-svc:/app
     depends_on:
@@ -85,10 +99,18 @@ services:
       context: ./order-svc
       dockerfile: Dockerfile
     environment:
+      # Instrumentation switch: 'otel' or 'elastic'
+      - APM_PROVIDER=${APM_PROVIDER:-otel}
+      # OpenTelemetry settings
       - PORT=8081
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4318
       - OTEL_SERVICE_NAME=order-svc
       - SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
+      # Elastic APM settings
+      - ELASTIC_APM_SERVER_URL=${ELASTIC_APM_SERVER_URL:-http://host.docker.internal:8200}
+      - ELASTIC_APM_SERVICE_NAME=order-svc
+      - ELASTIC_APM_SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
+      # Service connections
       - ELASTICSEARCH_URL=http://elasticsearch:9200
       - RABBITMQ_URL=amqp://rabbitmq:5672
       - PAYMENT_SVC_URL=payment-svc:9000
@@ -106,10 +128,16 @@ services:
       context: ./payment-svc
       dockerfile: Dockerfile
     environment:
+      # Instrumentation switch: 'otel' or 'elastic'
+      - APM_PROVIDER=${APM_PROVIDER:-otel}
       - PORT=9000
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317
       - OTEL_SERVICE_NAME=payment-svc
       - SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
+      # Elastic APM settings
+      - ELASTIC_APM_SERVER_URL=${ELASTIC_APM_SERVER_URL:-http://host.docker.internal:8200}
+      - ELASTIC_APM_SERVICE_NAME=payment-svc
+      - ELASTIC_APM_SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
     volumes:
       - ./payment-svc:/app
 
@@ -118,9 +146,15 @@ services:
       context: ./email-worker
       dockerfile: Dockerfile
     environment:
+      # Instrumentation switch: 'otel' or 'elastic'
+      - APM_PROVIDER=${APM_PROVIDER:-otel}
       - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317
       - OTEL_SERVICE_NAME=email-worker
       - SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
+      # Elastic APM settings
+      - ELASTIC_APM_SERVER_URL=${ELASTIC_APM_SERVER_URL:-http://host.docker.internal:8200}
+      - ELASTIC_APM_SERVICE_NAME=email-worker
+      - ELASTIC_APM_SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
       - ELASTICSEARCH_URL=http://elasticsearch:9200
       - RABBITMQ_URL=amqp://rabbitmq:5672
     volumes:

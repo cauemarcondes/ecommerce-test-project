@@ -1,18 +1,18 @@
 'use strict';
+const { loadInstrumentation } = require('./instrumentation-switch');
 
-// Load OpenTelemetry instrumentation first
-require('./instrumentation');
+const SERVICE_NAME = process.env.OTEL_SERVICE_NAME || 'email-worker';
+const { trace, context, propagation } = loadInstrumentation(SERVICE_NAME)
 
 const amqp = require('amqplib');
 const { Client } = require('@elastic/elasticsearch');
 const nodemailer = require('nodemailer');
-const { trace, context, SpanStatusCode, propagation } = require('@opentelemetry/api');
+const { SpanStatusCode } = require('@opentelemetry/api');
 const pino = require('pino');
 
 // Environment variables
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://rabbitmq:5672';
 const ELASTICSEARCH_URL = process.env.ELASTICSEARCH_URL || 'http://elasticsearch:9200';
-const SERVICE_NAME = process.env.OTEL_SERVICE_NAME || 'email-worker';
 const SERVICE_VERSION = process.env.SERVICE_VERSION || '0.1.0';
 
 // Initialize tracer

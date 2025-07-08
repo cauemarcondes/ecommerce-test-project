@@ -1,6 +1,12 @@
-// Initialize instrumentation first
-require('./instrumentation');
-const { trace } = require('@opentelemetry/api');
+// Initialize instrumentation first based on APM_PROVIDER
+const { apmProvider, loadInstrumentation } = require('./instrumentation-switch');
+
+// Load the appropriate instrumentation
+const SERVICE_NAME = process.env.OTEL_SERVICE_NAME || 'order-svc';
+const { trace } = loadInstrumentation(SERVICE_NAME)
+
+// Log which instrumentation system is active
+console.log(`Order Service using ${apmProvider} instrumentation`);
 
 const express = require('express');
 const amqp = require('amqplib');
@@ -29,7 +35,7 @@ const logger = pino({
   },
   base: {
     service: {
-      name: process.env.OTEL_SERVICE_NAME || 'order-svc',
+      name: SERVICE_NAME,
       version: process.env.SERVICE_VERSION || '0.1.0',
       environment: process.env.NODE_ENV || 'development'
     }
@@ -298,13 +304,14 @@ app.post('/order', async (req, res) => {
           message: paymentResult.message
         });
       }
-    
+      
       // Payment successful, update order status
       order.status = 'confirmed';
       order.paymentId = paymentResult.transaction_id;
       
       // Save order to Elasticsearch
       const esSpan = tracer.startSpan('ES /orders/_doc');
+      console.log("### Caue ~ returntracer.startActiveSpan ~ esSpan:", esSpan)
       esSpan.setAttribute('order.id', orderId);
       
       await esClient.index({

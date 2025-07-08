@@ -1,6 +1,12 @@
-// Initialize instrumentation first
-require('./instrumentation');
-const { trace, context, propagation } = require('./instrumentation');
+// Initialize instrumentation first based on APM_PROVIDER
+const { apmProvider, loadInstrumentation } = require('./instrumentation-switch');
+
+// Load the appropriate instrumentation
+const SERVICE_NAME = process.env.OTEL_SERVICE_NAME || 'api-gateway';
+const { trace, context, propagation } = loadInstrumentation(SERVICE_NAME)
+
+// Log which instrumentation system is active
+console.log(`API Gateway using ${apmProvider} instrumentation`);
 
 const express = require('express');
 const axios = require('axios');
@@ -11,7 +17,6 @@ const PORT = process.env.PORT || 3000;
 const CATALOG_SVC_URL = process.env.CATALOG_SVC_URL || 'http://catalog-svc:8080';
 const ORDER_SVC_URL = process.env.ORDER_SVC_URL || 'http://order-svc:8081';
 const GIT_SHA = process.env.GIT_SHA || '1'//require('child_process').execSync('git rev-parse --short HEAD').toString().trim();
-const SERVICE_NAME = process.env.OTEL_SERVICE_NAME || 'api-gateway';
 const SERVICE_VERSION = process.env.SERVICE_VERSION || '0.1.0';
 
 const tracer = trace.getTracer('api-gateway-tracer');

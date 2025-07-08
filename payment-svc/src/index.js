@@ -1,13 +1,14 @@
 'use strict';
 
-// Load OpenTelemetry instrumentation first
-require('./instrumentation');
+const { loadInstrumentation } = require('./instrumentation-switch');
+const SERVICE_NAME = process.env.OTEL_SERVICE_NAME || 'payment-svc';
+const { trace } = loadInstrumentation(SERVICE_NAME)
 
 const path = require('path');
 const grpc = require('@grpc/grpc-js');
 const protoLoader = require('@grpc/proto-loader');
 const { v4: uuidv4 } = require('uuid');
-const { trace, context, SpanStatusCode } = require('@opentelemetry/api');
+const { SpanStatusCode } = require('@opentelemetry/api');
 const pino = require('pino');
 
 // Constants for payment status
@@ -19,7 +20,6 @@ const STATUS = {
 
 // Environment variables
 const PORT = process.env.PORT || 9000;
-const SERVICE_NAME = process.env.OTEL_SERVICE_NAME || 'payment-svc';
 const SERVICE_VERSION = process.env.SERVICE_VERSION || '0.1.0';
 
 // Initialize tracer
