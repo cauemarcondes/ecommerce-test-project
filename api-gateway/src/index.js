@@ -1,6 +1,5 @@
-// Initialize instrumentation first
-require('./instrumentation');
-const { trace, context, propagation } = require('./instrumentation');
+// Initialize Elastic APM instrumentation first
+const { apm, createSpan, getCurrentTransaction, getCurrentSpan, addLabels, captureError } = require('./instrumentation');
 
 const express = require('express');
 const axios = require('axios');
@@ -10,11 +9,9 @@ const app = express();
 const PORT = process.env.PORT || 3000;
 const CATALOG_SVC_URL = process.env.CATALOG_SVC_URL || 'http://catalog-svc:8080';
 const ORDER_SVC_URL = process.env.ORDER_SVC_URL || 'http://order-svc:8081';
-const GIT_SHA = process.env.GIT_SHA || '1'//require('child_process').execSync('git rev-parse --short HEAD').toString().trim();
-const SERVICE_NAME = process.env.OTEL_SERVICE_NAME || 'api-gateway';
-const SERVICE_VERSION = process.env.SERVICE_VERSION || '0.1.0';
-
-const tracer = trace.getTracer('api-gateway-tracer');
+const GIT_SHA = process.env.GIT_SHA || '1';//require('child_process').execSync('git rev-parse --short HEAD').toString().trim();
+const SERVICE_NAME = process.env.ELASTIC_APM_SERVICE_NAME || 'api-gateway';
+const SERVICE_VERSION = process.env.ELASTIC_APM_SERVICE_VERSION || '0.1.0';
 
 // Configure ECS-compatible JSON logger with trace context
 const logger = pino({
@@ -29,20 +26,19 @@ const logger = pino({
     service: {
       name: SERVICE_NAME,
       version: SERVICE_VERSION
-    },
-    event: {
-      dataset: 'api-gateway.log'
     }
   },
   // Add trace.id and span.id to logs when available
   mixin() {
-    const span = trace.getActiveSpan();
-    if (!span) return {};
+    const currentTransaction = apm.currentTransaction;
+    const currentSpan = apm.currentSpan;
+    const activeSpan = currentSpan || currentTransaction;
+    
+    if (!activeSpan) return {};
 
-    const { traceId, spanId } = trace.getActiveSpan().spanContext();
     return {
-      trace: { id: traceId },
-      span: { id: spanId }
+      trace: { id: activeSpan.traceId },
+      span: { id: activeSpan.id }
     };
   }
 });
@@ -84,7 +80,12 @@ app.use((req, res, next) => {
 // Helper to propagate trace context in outgoing requests
 function injectTraceContext(config) {
   const headers = {};
-  propagation.inject(context.active(), headers);
+  const currentTransaction = apm.currentTransaction;
+  
+  if (currentTransaction && currentTransaction.traceparent) {
+    headers.traceparent = currentTransaction.traceparent;
+  }
+  
   config.headers = { ...config.headers, ...headers };
   return config;
 }
@@ -128,26 +129,31 @@ app.get('/products/:id', async (req, res) => {
 
 // POST /checkout - Process order checkout
 app.post('/checkout', async (req, res) => {
-  return tracer.startActiveSpan('checkout', async (span) => {
-    try {
-      // Validate request
-      const { productId, quantity, customerEmail } = req.body;
-      
-      if (!productId || !quantity || !customerEmail) {
-        logger.warn({
-          msg: 'Invalid checkout request',
-          request: { ...req.body }
-        });
-        span.setStatus({ code: 1, message: 'Invalid request parameters' });
-        span.end();
-        return res.status(400).json({ error: 'Missing required parameters' });
-      }
-
-      // Fetch product information
-      logger.info({
-        msg: `Fetching product ${productId} for checkout`
+  // Create an APM transaction for the checkout process
+  const transaction = apm.startTransaction('checkout', 'request');
+  
+  try {
+    // Validate request
+    const { productId, quantity, customerEmail } = req.body;
+    
+    if (!productId || !quantity || !customerEmail) {
+      logger.warn({
+        msg: 'Invalid checkout request',
+        request: { ...req.body }
       });
+      transaction.setOutcome('failure');
+      transaction.end();
+      return res.status(400).json({ error: 'Missing required parameters' });
+    }
 
+    // Fetch product information
+    logger.info({
+      msg: `Fetching product ${productId} for checkout`
+    });
+
+    // Create a span for fetching product details
+    const productSpan = createSpan('fetch_product');
+    try {
       const productResponse = await axios.get(
         `${CATALOG_SVC_URL}/products/${productId}`,
         injectTraceContext({})
@@ -156,9 +162,16 @@ app.post('/checkout', async (req, res) => {
       const product = productResponse.data;
       const totalAmount = product.price * quantity;
 
-      span.setAttribute('order.product_id', productId);
-      span.setAttribute('order.amount', totalAmount);
-      span.setAttribute('order.customer_email', customerEmail);
+      // Add labels for Elastic APM
+      transaction.addLabels({
+        'order.product_id': productId,
+        'order.quantity': quantity,
+        'order.amount': totalAmount,
+        'order.customer_email': customerEmail
+      });
+
+      productSpan.setOutcome('success');
+      productSpan.end();
 
       // Create order
       logger.info({
@@ -170,49 +183,67 @@ app.post('/checkout', async (req, res) => {
         }
       });
 
-      const orderResponse = await axios.post(
-        `${ORDER_SVC_URL}/order`,
-        {
-          productId,
-          productName: product.name,
-          quantity,
-          amount: totalAmount,
-          customerEmail
-        },
-        injectTraceContext({})
-      );
+      // Create a span for order creation
+      const orderSpan = createSpan('create_order');
+      try {
+        const orderResponse = await axios.post(
+          `${ORDER_SVC_URL}/order`,
+          {
+            productId,
+            productName: product.name,
+            quantity,
+            amount: totalAmount,
+            customerEmail
+          },
+          injectTraceContext({})
+        );
 
-      const orderData = orderResponse.data;
-      
-      span.setAttribute('order.id', orderData.id);
-      span.setStatus({ code: 0 }); // Success
-      span.end();
-      
-      res.status(201).json({
-        success: true,
-        message: 'Order created successfully',
-        orderId: orderData.id,
-        amount: totalAmount,
-        status: orderData.status
-      });
-      
+        const orderData = orderResponse.data;
+        transaction.addLabels({
+          'order.id': orderData.id
+        });
+        
+        orderSpan.setOutcome('success');
+        orderSpan.end();
+        
+        transaction.setOutcome('success');
+        transaction.end();
+        
+        res.status(201).json({
+          success: true,
+          message: 'Order created successfully',
+          orderId: orderData.id,
+          amount: totalAmount,
+          status: orderData.status
+        });
+      } catch (error) {
+        orderSpan.setOutcome('failure');
+        orderSpan.end();
+        throw error;
+      }
     } catch (error) {
-      logger.error({
-        msg: 'Checkout process failed',
-        error: error.message,
-        stack: error.stack
-      });
-      
-      span.recordException(error);
-      span.setStatus({ code: 1, message: error.message });
-      span.end();
-      
-      const status = error.response?.status || 500;
-      const message = error.response?.data?.error || 'Checkout process failed';
-      
-      res.status(status).json({ error: message });
+      if (productSpan) {
+        productSpan.setOutcome('failure');
+        productSpan.end();
+      }
+      throw error;
     }
-  })
+  } catch (error) {
+    logger.error({
+      msg: 'Checkout process failed',
+      error: error.message,
+      stack: error.stack
+    });
+    
+    apm.captureError(error);
+    transaction.setOutcome('failure');
+    transaction.end();
+    
+    const status = error.response?.status || 500;
+    const message = error.response?.data?.error || 'Checkout process failed';
+    
+    res.status(status).json({ error: message });
+  }
 });
 
 // Health check endpoint

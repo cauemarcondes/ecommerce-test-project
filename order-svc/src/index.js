@@ -1,6 +1,5 @@
-// Initialize instrumentation first
-require('./instrumentation');
-const { trace } = require('@opentelemetry/api');
+// Initialize Elastic APM instrumentation first
+const { apm, createSpan} = require('./instrumentation');
 
 const express = require('express');
 const amqp = require('amqplib');
@@ -17,8 +16,6 @@ const ELASTICSEARCH_URL = process.env.ELASTICSEARCH_URL || 'http://elasticsearch
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://rabbitmq:5672';
 const PAYMENT_SVC_URL = process.env.PAYMENT_SVC_URL || 'payment-svc:9000';
 
-const tracer = trace.getTracer('order-svc');
-
 // Configure ECS-compatible JSON logger with trace context
 const logger = pino({
   level: process.env.LOG_LEVEL || 'info',
@@ -29,20 +26,23 @@ const logger = pino({
   },
   base: {
     service: {
-      name: process.env.OTEL_SERVICE_NAME || 'order-svc',
-      version: process.env.SERVICE_VERSION || '0.1.0',
+      name: process.env.ELASTIC_APM_SERVICE_NAME || 'order-svc',
+      version: process.env.ELASTIC_APM_SERVICE_VERSION || '0.1.0',
       environment: process.env.NODE_ENV || 'development'
     }
   },
   // Add trace.id and span.id to logs when available
   mixin() {
-    const span = trace.getActiveSpan();
-    if (!span) return {};
+    // Get current transaction or span from Elastic APM
+    const currentTransaction = apm.currentTransaction;
+    const currentSpan = apm.currentSpan;
+    const activeSpan = currentSpan || currentTransaction;
     
-    const { traceId, spanId } = trace.getActiveSpan().spanContext();
+    if (!activeSpan) return {};
+
     return {
-      trace: { id: traceId },
-      span: { id: spanId }
+      trace: { id: activeSpan.traceId },
+      span: { id: activeSpan.id }
     };
   }
 });
@@ -99,11 +99,12 @@ async function setupRabbitMQ() {
 
 // Initialize Elasticsearch index
 async function setupElasticsearch() {
-  // Create tracer for Elasticsearch operations
-  return tracer.startActiveSpan('ES /orders/_create', async (span) => {
-    try {
-      // Check if index exists
-      const indexExists = await esClient.indices.exists({ index: 'orders' });
+  // Create transaction for Elasticsearch operations
+  const transaction = apm.startTransaction('ES /orders/_create', 'db');
+  
+  try {
+    // Check if index exists
+    const indexExists = await esClient.indices.exists({ index: 'orders' });
     
     if (!indexExists.body) {
       // Create index with mapping
@@ -126,89 +127,105 @@ async function setupElasticsearch() {
       });
       logger.info('Created orders index');
     }
-    span.end();
+    transaction.setOutcome('success');
   } catch (error) {
-    span.recordException(error);
-    span.end();
+    apm.captureError(error);
+    transaction.setOutcome('failure');
     logger.error({ msg: 'Failed to setup Elasticsearch index', error: error.message });
   }
-});
+  transaction.end();
 }
 
 // Process payment via gRPC
 function processPayment(orderId, amount) {
   return new Promise((resolve, reject) => {
-    return tracer.startActiveSpan('gRPC payment.Charge', async (span) => {
-      try {
-        span.setAttribute('order.id', orderId);
-        span.setAttribute('payment.amount', amount);
-        
-        paymentClient.Charge({
-          order_id: orderId,
-          amount: amount,
-          currency: 'USD'
-        }, (error, response) => {
-          if (error) {
-              span.recordException(error);
-            span.end();
-            reject(error);
-            return;
-          }
+    // Create transaction for payment processing
+    const transaction = apm.startTransaction('gRPC payment.Charge', 'external');
+    
+    try {
+      // Add labels for the payment details
+      transaction.addLabels({
+        'order.id': orderId,
+        'payment.amount': amount
+      });
       
-          span.setAttribute('payment.status', response.status);
-          span.setAttribute('payment.transaction_id', response.transaction_id);
-          span.end();
-          
-          resolve(response);
+      paymentClient.Charge({
+        order_id: orderId,
+        amount: amount,
+        currency: 'USD'
+      }, (error, response) => {
+        if (error) {
+          apm.captureError(error);
+          transaction.setOutcome('failure');
+          transaction.end();
+          reject(error);
+          return;
+        }
+    
+        // Add response details as labels
+        transaction.addLabels({
+          'payment.status': response.status,
+          'payment.transaction_id': response.transaction_id
         });
-      } catch (error) {
-        span.recordException(error);
-        span.end();
-        reject(error);
-      }
-    });
+        transaction.setOutcome('success');
+        transaction.end();
+        
+        resolve(response);
+      });
+    } catch (error) {
+      apm.captureError(error);
+      transaction.setOutcome('failure');
+      transaction.end();
+      reject(error);
+    }
   });
 }
 
 // Publish order confirmed message
 async function publishOrderConfirmed(order) {
-  return tracer.startActiveSpan('RabbitMQ publish order.confirmed', async (span) => {
-    try {
-      if (!rabbitChannel) {
-        throw new Error('RabbitMQ channel not available');
-      }
-      
-      span.setAttribute('order.id', order.id);
-      
-      await rabbitChannel.publish(
-        'orders',
-        'order.confirmed',
-        Buffer.from(JSON.stringify(order)),
-        { 
-          contentType: 'application/json',
-          messageId: uuidv4(),
-          timestamp: Math.floor(Date.now() / 1000)
-        }
-      );
-      
-      logger.info({ 
-        msg: 'Published order.confirmed event',
-        orderId: order.id
-      });
-      
-      span.end();
-      return true;
-    } catch (error) {
-      span.recordException(error);
-      span.end();
-      logger.error({ 
-        msg: 'Failed to publish order.confirmed event',
-        error: error.message,
-        orderId: order.id  
-      });
-      return false;
+  // Create a transaction for publishing to RabbitMQ
+  const transaction = apm.startTransaction('RabbitMQ publish order.confirmed', 'messaging');
+  
+  try {
+    if (!rabbitChannel) {
+      throw new Error('RabbitMQ channel not available');
     }
-  });
+    
+    // Add order details as labels
+    transaction.addLabels({
+      'order.id': order.id
+    });
+    
+    await rabbitChannel.publish(
+      'orders',
+      'order.confirmed',
+      Buffer.from(JSON.stringify(order)),
+      { 
+        contentType: 'application/json',
+        messageId: uuidv4(),
+        timestamp: Math.floor(Date.now() / 1000)
+      }
+    );
+    
+    logger.info({ 
+      msg: 'Published order.confirmed event',
+      orderId: order.id
+    });
+    
+    transaction.setOutcome('success');
+    transaction.end();
+    return true;
+  } catch (error) {
+    apm.captureError(error);
+    transaction.setOutcome('failure');
+    logger.error({ 
+      msg: 'Failed to publish order.confirmed event',
+      error: error.message,
+      orderId: order.id
+    });
+    transaction.end();
+    throw error;
+  }
 }
 
 // API Routes
@@ -226,16 +243,18 @@ app.get('/health', (req, res) => {
 
 // Create order endpoint
 app.post('/order', async (req, res) => {
-  return tracer.startActiveSpan('create_order', async (orderSpan) => {
-    try {
-      // Validate request
-      const { productId, productName, quantity, amount, customerEmail } = req.body;
+  // Create an Elastic APM transaction for order creation
+  const transaction = apm.startTransaction('create_order', 'request');
+  
+  try {
+    // Validate request
+    const { productId, productName, quantity, amount, customerEmail } = req.body;
      
-      if (!productId || !quantity || !amount || !customerEmail) {
-        orderSpan.setAttribute('error', true);
-        orderSpan.end();
-        return res.status(400).json({ error: 'Missing required parameters' });
-      }
+    if (!productId || !quantity || !amount || !customerEmail) {
+      transaction.setOutcome('failure');
+      transaction.end();
+      return res.status(400).json({ error: 'Missing required parameters' });
+    }
       
       // Create order object
       const orderId = uuidv4();
@@ -250,11 +269,13 @@ app.post('/order', async (req, res) => {
         createdAt: new Date().toISOString()
       };
       
-      // Add order details as span attributes
-      orderSpan.setAttribute('order.id', orderId);
-      orderSpan.setAttribute('order.product_id', productId);
-      orderSpan.setAttribute('order.amount', amount);
-      orderSpan.setAttribute('order.customer_email', customerEmail);
+      // Add order details as transaction labels
+      transaction.addLabels({
+        'order.id': orderId,
+        'order.product_id': productId,
+        'order.amount': amount,
+        'order.customer_email': customerEmail
+      });
       
       // Process payment
       logger.info({ 
@@ -269,26 +290,36 @@ app.post('/order', async (req, res) => {
         order.status = 'payment_failed';
         
         // Save failed order to Elasticsearch
-        const esSpan = tracer.startSpan('ES /orders/_doc');
-        esSpan.setAttribute('order.id', orderId);
+        const esSpan = apm.startSpan('ES /orders/_doc');
         
-        await esClient.index({
-          index: 'orders',
-          id: orderId,
-          body: order,
-          refresh: true
+        try {
+          await esClient.index({
+            index: 'orders',
+            id: orderId,
+            body: order,
+            refresh: true
+          });
+          esSpan.setOutcome('success');
+        } catch (error) {
+          esSpan.setOutcome('failure');
+          throw error;
+        } finally {
+          esSpan.end();
+        }
+        
+        transaction.addLabels({
+          'error': true,
+          'payment.status': paymentResult.status
         });
         
-        esSpan.end();
-        
-        orderSpan.setAttribute('error', true);
-        orderSpan.setAttribute('payment.status', paymentResult.status);
-        orderSpan.end();
+        transaction.setOutcome('failure');
+        transaction.end();
         
         logger.warn({ 
           msg: 'Payment declined',
           orderId,
-          paymentStatus: paymentResult.status
+          paymentStatus: paymentResult.status,
+          message: paymentResult.message
         });
         
         return res.status(400).json({
@@ -304,84 +335,113 @@ app.post('/order', async (req, res) => {
       order.paymentId = paymentResult.transaction_id;
       
       // Save order to Elasticsearch
-      const esSpan = tracer.startSpan('ES /orders/_doc');
-      esSpan.setAttribute('order.id', orderId);
+      const esSpan = apm.startSpan('ES /orders/_doc');
       
-      await esClient.index({
-        index: 'orders',
-        id: orderId,
-        body: order,
-        refresh: true
-      });
-      
-      esSpan.end();
+      try {
+        await esClient.index({
+          index: 'orders',
+          id: orderId,
+          body: order,
+          refresh: true
+        });
+        esSpan.setOutcome('success');
+      } catch (error) {
+        esSpan.setOutcome('failure');
+        throw error;
+      } finally {
+        esSpan.end();
+      }
       
       // Publish order confirmed event
       await publishOrderConfirmed(order);
       
-      orderSpan.end();
+      // Set successful outcome and end the transaction
+      transaction.addLabels({
+        'payment.transaction_id': paymentResult.transaction_id
+      });
+      transaction.setOutcome('success');
+      transaction.end();
       
-      logger.info({ 
-        msg: 'Order created successfully',
+      // Return success response
+      return res.status(201).json({
         orderId,
         status: order.status
       });
-      
-      res.status(201).json({
-        id: orderId,
-        status: order.status,
-        paymentId: paymentResult.transaction_id
-      });
     } catch (error) {
-      orderSpan.recordException(error);
-      orderSpan.end();
+      // Capture the error and end the transaction
+      apm.captureError(error);
+      transaction.setOutcome('failure');
+      transaction.end();
       
-      logger.error({ 
-        msg: 'Failed to create order',
+      logger.error({
+        msg: 'Failed to create order', 
         error: error.message,
         stack: error.stack
       });
       
-      res.status(500).json({ error: 'Failed to process order' });
+      return res.status(500).json({
+        error: 'Failed to process order'
+      });
     }
-  });
 });
 
 // Get order by ID
 app.get('/order/:id', async (req, res) => {
   const orderId = req.params.id;
-  return tracer.startActiveSpan('ES /orders/_doc', async (span) => {
-    span.setAttribute('order.id', orderId);
+  // Create a transaction for getting an order
+  const transaction = apm.startTransaction('get_order', 'request');
   
+  // Add order ID as a label
+  transaction.addLabels({
+    'order.id': orderId
+  });
+  
+  try {
+    // Create a span for Elasticsearch operation
+    const esSpan = createSpan('ES /orders/_get');
+    
+    let result;
     try {
-      const result = await esClient.get({
+      result = await esClient.get({
         index: 'orders',
         id: orderId
       });
-      
-      span.end();
-      
-      if (!result.body || !result.body._source) {
-        return res.status(404).json({ error: 'Order not found' });
-      }
-      
-      res.json(result.body._source);
+      esSpan.setOutcome('success');
     } catch (error) {
-      span.recordException(error);
-      span.end();
-      
-      logger.error({ 
-        msg: `Failed to fetch order ${orderId}`,
-        error: error.message
-      });
-      
-      if (error.statusCode === 404) {
-        return res.status(404).json({ error: 'Order not found' });
-      }
-      
-      res.status(500).json({ error: 'Failed to fetch order' });
+      esSpan.setOutcome('failure');
+      throw error;
+    } finally {
+      esSpan.end();
     }
-  });
+    
+    if (!result.body || !result.body._source) {
+      transaction.setOutcome('failure');
+      transaction.end();
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    
+    // Success response
+    transaction.setOutcome('success');
+    transaction.end();
+    return res.json(result.body._source);
+    
+  } catch (error) {
+    // Capture the error
+    apm.captureError(error);
+    transaction.setOutcome('failure');
+    transaction.end();
+    
+    logger.error({ 
+      msg: `Failed to fetch order ${orderId}`,
+      error: error.message
+    });
+    
+    if (error.statusCode === 404) {
+      return res.status(404).json({ error: 'Order not found' });
+    }
+    
+    return res.status(500).json({ error: 'Failed to fetch order' });
+  }
 });
 
 // Start the application

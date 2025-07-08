@@ -1,64 +1,62 @@
+// Elastic APM instrumentation for API Gateway
 'use strict';
 
-const { NodeSDK } = require('@opentelemetry/sdk-node');
-const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node');
-const { Resource } = require('@opentelemetry/resources');
-const { SemanticResourceAttributes } = require('@opentelemetry/semantic-conventions');
-const { OTLPTraceExporter } = require('@opentelemetry/exporter-trace-otlp-grpc');
-const { GrpcInstrumentation } = require('@opentelemetry/instrumentation-grpc');
-const { W3CTraceContextPropagator } = require('@opentelemetry/core');
-const { CompositePropagator, W3CBaggagePropagator } = require('@opentelemetry/core');
+// Import Elastic APM agent
+const apm = require('elastic-apm-node');
 
-// Read from environment variables
-const serviceName = process.env.OTEL_SERVICE_NAME || 'payment-svc';
-const serviceVersion = process.env.SERVICE_VERSION || '0.1.0';
-const environment = process.env.NODE_ENV || 'development';
-
-// Create a custom exporter
-const traceExporter = new OTLPTraceExporter({
-  url: process.env.OTEL_EXPORTER_OTLP_ENDPOINT || 'http://host.docker.internal:4317',
+// Start the Elastic APM agent
+const agent = apm.start({
+  serviceName: process.env.ELASTIC_APM_SERVICE_NAME || 'payment-svc',
+  serviceVersion: process.env.ELASTIC_APM_SERVICE_VERSION || '0.1.0',
+  // APM Server URL
+  serverUrl: process.env.ELASTIC_APM_SERVER_URL || 'http://localhost:8200',
+  // Environment
+  environment: process.env.NODE_ENV || 'development',
+  // Set log level based on environment
+  logLevel: process.env.NODE_ENV === 'production' ? 'info' : 'debug',
+  // Enable central configuration
+  centralConfig: true,
+  // Capture request bodies for errors
+  captureBody: 'errors',
+  // Paths to ignore
+  ignoreUrls: ['/health', '/favicon.ico'],
+  // Always capture error stack traces
+  captureErrorLogStackTraces: 'always',
+  // Capture span stack traces for performance debugging
+  captureSpanStackTraces: true,
 });
 
-// Configure the SDK with the exporter and the custom resource attributes
-const sdk = new NodeSDK({
-  resource: new Resource({
-    [SemanticResourceAttributes.SERVICE_NAME]: serviceName,
-    [SemanticResourceAttributes.SERVICE_VERSION]: serviceVersion,
-    'deployment.environment': environment,
-  }),
-  traceExporter,
-  instrumentations: [
-    // Add gRPC-specific instrumentation
-    new GrpcInstrumentation({
-      // Additional configuration as needed
-      serverName: serviceName,
-    }),
-    // Auto-instrument other common libraries
-    getNodeAutoInstrumentations({
-      // Configure specific instrumentations if needed
-      '@opentelemetry/instrumentation-fs': {
-        enabled: false,
-      },
-    }),
-  ],
-  // Configure a custom propagator that includes W3C TraceContext and Baggage
-  textMapPropagator: new CompositePropagator({
-    propagators: [
-      new W3CTraceContextPropagator(),
-      new W3CBaggagePropagator(),
-    ],
-  }),
-});
+console.log(`Elastic APM agent initialized for payment-svc`);
 
-// Initialize the SDK
-sdk.start();
-
-// Graceful shutdown
+// Gracefully shut down on process termination
 process.on('SIGTERM', () => {
-  sdk.shutdown()
-    .then(() => console.log('OpenTelemetry SDK shut down successfully'))
-    .catch((error) => console.error('Error shutting down OpenTelemetry SDK', error))
-    .finally(() => process.exit(0));
+  if (agent) {
+    agent.flush();
+  }
+  process.exit(0);
 });
 
-console.log(`OpenTelemetry instrumentation initialized for ${serviceName} (${serviceVersion})`);
+// Helper functions for working with APM
+function createSpan(name, type = 'custom') {
+  return apm.startSpan(name, type);
+}
+
+// Export the APM agent and utility functions
+module.exports = {
+  apm,
+  createSpan,
+  // Convenience function to access the current transaction or span
+  getCurrentTransaction: () => apm.currentTransaction,
+  getCurrentSpan: () => apm.currentSpan,
+  // For distributed tracing
+  addLabels: (labels) => {
+    const current = apm.currentTransaction || apm.currentSpan;
+    if (current && labels) {
+      current.addLabels(labels);
+    }
+  },
+  // Capture errors
+  captureError: (error, options) => {
+    apm.captureError(error, options);
+  }
+};

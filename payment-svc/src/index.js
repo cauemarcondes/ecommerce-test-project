@@ -1,13 +1,12 @@
 'use strict';
 
-// Load OpenTelemetry instrumentation first
-require('./instrumentation');
+// Load Elastic APM instrumentation first
+const { apm, createSpan } = require('./instrumentation');
 
 const path = require('path');
 const grpc = require('@grpc/grpc-js');
 const protoLoader = require('@grpc/proto-loader');
 const { v4: uuidv4 } = require('uuid');
-const { trace, context, SpanStatusCode } = require('@opentelemetry/api');
 const pino = require('pino');
 
 // Constants for payment status
@@ -19,11 +18,8 @@ const STATUS = {
 
 // Environment variables
 const PORT = process.env.PORT || 9000;
-const SERVICE_NAME = process.env.OTEL_SERVICE_NAME || 'payment-svc';
-const SERVICE_VERSION = process.env.SERVICE_VERSION || '0.1.0';
-
-// Initialize tracer
-const tracer = trace.getTracer('payment-svc-tracer');
+const SERVICE_NAME = process.env.ELASTIC_APM_SERVICE_NAME || 'payment-svc';
+const SERVICE_VERSION = process.env.ELASTIC_APM_SERVICE_VERSION || '0.1.0';
 
 // Initialize logger with ECS formatting
 const logger = pino({
@@ -38,26 +34,36 @@ const logger = pino({
     service: {
       name: SERVICE_NAME,
       version: SERVICE_VERSION
-    },
-    event: {
-      dataset: 'payment.log'
     }
+  },
+  // Add trace.id and span.id to logs when available
+  mixin() {
+    const currentTransaction = apm.currentTransaction;
+    const currentSpan = apm.currentSpan;
+    const activeSpan = currentSpan || currentTransaction;
+    
+    if (!activeSpan) return {};
+
+    return {
+      trace: { id: activeSpan.traceId },
+      span: { id: activeSpan.id }
+    };
   }
 });
 
 // Helper to add trace context to logs
-function addTraceContext(span, log = {}) {
-  if (!span || !span.spanContext) return log;
+function addTraceContext(log = {}) {
+  const currentTransaction = apm.currentTransaction;
+  const currentSpan = apm.currentSpan;
+  const activeSpan = currentSpan || currentTransaction;
   
-  const spanContext = span.spanContext();
-  if (spanContext.traceId) {
-    return {
-      ...log,
-      trace: { id: spanContext.traceId },
-      span: { id: spanContext.spanId }
-    };
-  }
-  return log;
+  if (!activeSpan) return log;
+  
+  return {
+    ...log,
+    trace: { id: activeSpan.traceId },
+    span: { id: activeSpan.id }
+  };
 }
 
 // Load the protobuf definition
@@ -75,10 +81,15 @@ const protoDescriptor = grpc.loadPackageDefinition(packageDefinition);
 const paymentProto = protoDescriptor.payment;
 
 // Simulate a payment gateway with artificial delays and failures
-async function simulatePaymentGateway(amount, span) {
+async function simulatePaymentGateway(amount) {
   return new Promise((resolve, reject) => {
-    // Add attributes to the span
-    span.setAttribute('payment.amount', amount);
+    // Create a span for the payment gateway operation
+    const span = createSpan('payment_gateway_request');
+    
+    // Add labels to the span
+    span.addLabels({
+      'payment.amount': amount
+    });
     
     // Add artificial delay (25-200ms)
     const delay = 25 + Math.floor(Math.random() * 175);
@@ -86,24 +97,31 @@ async function simulatePaymentGateway(amount, span) {
       // // Randomly simulate gateway errors (10% chance)
       // if (Math.random() < 0.1) {
       //   const error = new Error('Payment gateway connection timeout');
-      //   span.recordException(error);
-      //   span.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+      //   apm.captureError(error);
+      //   span.setOutcome('failure');
+      //   span.end();
       //   return reject(error);
       // }
       
       // // For high amount payments (>1000), simulate declined payments more often
       // if (amount > 1000 && Math.random() < 0.3) {
-      //   span.setAttribute('payment.declined_reason', 'amount_too_high');
+      //   span.addLabels({'payment.declined_reason': 'amount_too_high'});
+      //   span.setOutcome('success');
+      //   span.end();
       //   return resolve(STATUS.DECLINED);
       // }
       
       // // Normal transaction flow, 10% decline rate
       // if (Math.random() < 0.1) {
-      //   span.setAttribute('payment.declined_reason', 'random_decline');
+      //   span.addLabels({'payment.declined_reason': 'random_decline'});
+      //   span.setOutcome('success');
+      //   span.end();
       //   return resolve(STATUS.DECLINED);
       // }
       
       // Payment approved
+      span.setOutcome('success');
+      span.end();
       return resolve(STATUS.APPROVED);
     }, delay);
   });
@@ -111,184 +129,184 @@ async function simulatePaymentGateway(amount, span) {
 
 // Process a payment charge with retry logic and span links
 async function processPaymentWithRetry(call) {
-  return await tracer.startActiveSpan('payment_process', async (parentSpan) => {
-    try {
-      const { order_id, amount, currency } = call.request;
-      
-      // Add attributes to the parent span
-      parentSpan.setAttribute('payment.order_id', order_id);
-      parentSpan.setAttribute('payment.amount', amount);
-      parentSpan.setAttribute('payment.currency', currency);
-      
-      // Generate transaction ID
-      const transactionId = uuidv4();
-      parentSpan.setAttribute('payment.transaction_id', transactionId);
-      
-      // Payment info for logging
-      const paymentInfo = {
-        payment: {
-          order_id: order_id,
-          amount: amount,
-          currency: currency,
-          transaction_id: transactionId
-        }
-      };
-      
-      // Log payment processing start
-      logger.info(addTraceContext(parentSpan, {
-        message: 'Processing payment',
-        ...paymentInfo
-      }));
-      
-      // Retry configuration
-      const maxRetries = 3;
-      let lastError = null;
-      
-      // Retry logic with span links
-      for (let attempt = 0; attempt < maxRetries; attempt++) {
-        // Create a span for this attempt
-        const attemptResult = await tracer.startActiveSpan(
-          `payment_attempt_${attempt + 1}`, 
-          { attributes: { 
-              'payment.attempt': attempt + 1,
-              'payment.transaction_id': transactionId 
-            }
-          }, 
-          async (attemptSpan) => {
-            try {
-              // Process the gateway request in a child span
-              const gatewayResult = await tracer.startActiveSpan(
-                'payment_gateway_request',
-                async (gatewaySpan) => {
-                  try {
-                    return await simulatePaymentGateway(amount, gatewaySpan);
-                  } catch (error) {
-                    throw error;
-                  } finally {
-                    gatewaySpan.end();
-                  }
-                }
-              );
-              
-              // Handle the result based on status
-              if (gatewayResult === STATUS.APPROVED) {
-                // Payment approved
-                attemptSpan.setAttribute('payment.status', 'APPROVED');
-                attemptSpan.setStatus({ code: SpanStatusCode.OK, message: 'Payment approved' });
-                
-                paymentInfo.payment.status = 'APPROVED';
-                logger.info(addTraceContext(attemptSpan, {
-                  message: 'Payment approved',
-                  ...paymentInfo
-                }));
-                
-                return {
-                  status: STATUS.APPROVED,
-                  transaction_id: transactionId,
-                  message: 'Payment approved'
-                };
-              } else {
-                // Payment declined
-                attemptSpan.setAttribute('payment.status', 'DECLINED');
-                attemptSpan.setStatus({ code: SpanStatusCode.OK, message: 'Payment declined' });
-                
-                paymentInfo.payment.status = 'DECLINED';
-                logger.warn(addTraceContext(attemptSpan, {
-                  message: 'Payment declined',
-                  ...paymentInfo
-                }));
-                
-                return {
-                  status: STATUS.DECLINED,
-                  transaction_id: transactionId,
-                  message: 'Payment declined by processor'
-                };
-              }
-            } catch (error) {
-              // Payment attempt failed
-              attemptSpan.recordException(error);
-              attemptSpan.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
-              
-              lastError = error;
-              logger.error(addTraceContext(attemptSpan, {
-                message: `Payment attempt ${attempt + 1} failed`,
-                error: { message: error.message },
-                ...paymentInfo
-              }));
-              
-              // Add delay before retry
-              await new Promise(resolve => setTimeout(resolve, 100 * (attempt + 1)));
-              return null; // Null indicates retry needed
-            } finally {
-              attemptSpan.end();
-            }
-          }
-        );
-        
-        // If we got a result, return it
-        if (attemptResult !== null) {
-          // Set parent span status based on final result
-          if (attemptResult.status === STATUS.APPROVED) {
-            parentSpan.setStatus({ code: SpanStatusCode.OK, message: 'Payment approved' });
-          } else {
-            parentSpan.setStatus({ code: SpanStatusCode.OK, message: 'Payment declined' });
-          }
-          
-          return attemptResult;
-        }
+  // Create a transaction for processing a payment
+  const transaction = apm.startTransaction('payment_process', 'request');
+  
+  try {
+    const { order_id, amount, currency } = call.request;
+    
+    // Add labels to the transaction
+    transaction.addLabels({
+      'payment.order_id': order_id,
+      'payment.amount': amount,
+      'payment.currency': currency
+    });
+    
+    // Generate transaction ID
+    const transactionId = uuidv4();
+    transaction.addLabels({
+      'payment.transaction_id': transactionId
+    });
+    
+    // Payment info for logging
+    const paymentInfo = {
+      payment: {
+        order_id: order_id,
+        amount: amount,
+        currency: currency,
+        transaction_id: transactionId
       }
+    };
+    
+    // Log payment processing start
+    logger.info(addTraceContext({
+      message: 'Processing payment',
+      ...paymentInfo
+    }));
+    
+    // Retry configuration
+    const maxRetries = 3;
+    let lastError = null;
+    let result = null;
+    
+    // Retry logic with spans for each attempt
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      // Create a span for this attempt
+      const attemptSpan = createSpan(`payment_attempt_${attempt + 1}`);
       
-      // All retries failed
-      parentSpan.recordException(lastError);
-      parentSpan.setStatus({ 
-        code: SpanStatusCode.ERROR, 
-        message: 'Payment processing failed after retries' 
+      // Add attempt information to the span
+      attemptSpan.addLabels({ 
+        'payment.attempt': attempt + 1,
+        'payment.transaction_id': transactionId 
       });
       
-      paymentInfo.payment.status = 'ERROR';
-      logger.error(addTraceContext(parentSpan, {
-        message: 'Payment processing failed after retries',
-        error: { message: lastError.message },
+      try {
+        // Process the payment using the gateway simulation
+        const gatewayResult = await simulatePaymentGateway(amount);
+        
+        // Process gateway result
+        if (gatewayResult === STATUS.APPROVED) {
+          attemptSpan.addLabels({
+            'payment.status': 'approved'
+          });
+          attemptSpan.setOutcome('success');
+          
+          result = {
+            status: 'APPROVED',
+            transaction_id: transactionId
+          };
+          
+          // End the span for this attempt
+          attemptSpan.end();
+          
+          // Success! Break the retry loop
+          break;
+        } else {
+          // Payment was declined
+          attemptSpan.addLabels({
+            'payment.status': 'declined'
+          });
+          
+          lastError = new Error('Payment declined by gateway');
+          attemptSpan.setOutcome('failure');
+          attemptSpan.end();
+          
+          throw lastError;
+        }
+      } catch (error) {
+        // Capture the error
+        apm.captureError(error);
+        attemptSpan.setOutcome('failure');
+        attemptSpan.end();
+        
+        // Save for retry logic
+        lastError = error;
+        
+        // Log the error
+        logger.warn(addTraceContext({
+          message: `Payment attempt ${attempt + 1} failed`,
+          attempt: attempt + 1,
+          error: error.message,
+          ...paymentInfo
+        }));
+        
+        // Determine if we should retry
+        if (attempt === maxRetries - 1) {
+          // Last attempt failed
+          break;
+        }
+        
+        // Add delay before retry (exponential backoff)
+        const delay = 100 * Math.pow(2, attempt);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      }
+    }
+    
+    // Process final result
+    if (result) {
+      // Payment succeeded
+      logger.info(addTraceContext({
+        message: 'Payment processed successfully',
+        status: 'APPROVED',
         ...paymentInfo
       }));
       
-      return {
-        status: STATUS.ERROR,
-        transaction_id: transactionId,
-        message: 'Payment processing failed after multiple attempts'
-      };
-    } catch (error) {
-      // Unexpected error
-      parentSpan.recordException(error);
-      parentSpan.setStatus({ code: SpanStatusCode.ERROR, message: error.message });
+      transaction.setOutcome('success');
+      transaction.end();
       
-      logger.error(addTraceContext(parentSpan, {
-        message: 'Unexpected error during payment processing',
-        error: { message: error.message }
+      return result;
+    } else {
+      // All retries failed
+      logger.error(addTraceContext({
+        message: 'Payment processing failed after retries',
+        attempts: maxRetries,
+        error: lastError.message,
+        ...paymentInfo
       }));
       
+      transaction.setOutcome('failure');
+      transaction.end();
+      
       return {
-        status: STATUS.ERROR,
-        transaction_id: uuidv4(),
-        message: 'Unexpected error during payment processing'
+        status: 'ERROR',
+        message: lastError.message
       };
-    } finally {
-      parentSpan.end();
     }
-  });
+  } catch (error) {
+    // Unexpected error
+    apm.captureError(error);
+    
+    logger.error(addTraceContext({
+      message: 'Unexpected error during payment processing',
+      error: { message: error.message, stack: error.stack },
+      ...paymentInfo
+    }));
+    
+    transaction.setOutcome('failure');
+    transaction.end();
+    
+    return {
+      status: 'ERROR',
+      message: error.message
+    };
+  }
 }
 
 // Implement the gRPC service
 const paymentService = {
   charge: async (call, callback) => {
+    // Note: We don't need to create a transaction here as processPaymentWithRetry already creates one
     try {
       const result = await processPaymentWithRetry(call);
       callback(null, result);
     } catch (error) {
-      logger.error({
+      // Capture the error with Elastic APM
+      apm.captureError(error);
+      
+      logger.error(addTraceContext({
         message: 'Error processing payment charge',
         error: { message: error.message }
-      });
+      }));
       
       callback({
         code: grpc.status.INTERNAL,
@@ -300,6 +318,9 @@ const paymentService = {
 
 // Start the gRPC server
 function startServer() {
+  // Create a transaction for server startup
+  const transaction = apm.startTransaction('server_start', 'system');
+  
   const server = new grpc.Server();
   server.addService(paymentProto.Payment.service, paymentService);
   
@@ -308,21 +329,29 @@ function startServer() {
     grpc.ServerCredentials.createInsecure(),
     (error, port) => {
       if (error) {
-        logger.error({ 
+        apm.captureError(error);
+        transaction.setOutcome('failure');
+        transaction.end();
+        
+        logger.error(addTraceContext({ 
           message: 'Failed to start gRPC server', 
           error: { message: error.message } 
-        });
+        }));
         return;
       }
       
       server.start();
-      logger.info({
+      
+      transaction.setOutcome('success');
+      transaction.end();
+      
+      logger.info(addTraceContext({
         message: `Payment gRPC server started on port ${port}`,
         service: {
           name: SERVICE_NAME,
           version: SERVICE_VERSION
         }
-      });
+      }));
     }
   );
   
