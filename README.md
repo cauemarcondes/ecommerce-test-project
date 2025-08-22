@@ -52,6 +52,8 @@ A polyglot micro-service system designed to experiment with OpenTelemetry instru
 ### Start the System
 
 ```bash
+#install deps:
+./install-all.sh
 # Start all services
 make up
 # Or without Make: docker-compose up -d
