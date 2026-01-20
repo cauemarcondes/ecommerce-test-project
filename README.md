@@ -52,10 +52,8 @@ A polyglot micro-service system designed to experiment with OpenTelemetry instru
 ### Start the System
 
 ```bash
-# Clone the repository
-git clone <repository-url>
-cd mini-shop-otel
-
+#install deps:
+./install-all.sh
 # Start all services
 make up
 # Or without Make: docker-compose up -d
@@ -72,13 +70,18 @@ make status
 curl -X POST http://localhost:4000/checkout \
   -H "Content-Type: application/json" \
   -d '{"productId": "1", "quantity": 2, "customerEmail": "user@example.com"}'
+# Load test
+k6 run load-test.js
 ```
 
 ### View Traces
 
-1. Open Kibana at http://localhost:5601
-2. Navigate to Observability > APM > Services
-3. Explore the services, transactions, and trace details
+1. Open Kibana at http://localhost:5699
+2. Open Discover:
+3. ```
+   FROM traces-*
+   ```
+   
 
 ### Shutdown
 
