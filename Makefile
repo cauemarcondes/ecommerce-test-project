@@ -41,7 +41,7 @@ logs:
 # Test the API with a checkout request
 test:
 	@echo "Testing the system with a checkout request..."
-	curl -X POST http://localhost:3000/checkout \
+	curl -X POST http://localhost:4000/checkout \
 	  -H "Content-Type: application/json" \
 	  -d '{"productId": "2", "quantity": 1, "customerEmail": "user@example.com"}'
 

@@ -5,7 +5,7 @@ A Node.js Express service that acts as an entry point to the mini-shop-otel micr
 ## Environment Variables
 
 ```
-PORT=3000
+PORT=4000
 OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317
 OTEL_SERVICE_NAME=api-gateway
 SERVICE_VERSION=0.1.0
@@ -35,7 +35,7 @@ Retrieve all products from the catalog service
 
 Example:
 ```bash
-curl -X GET http://localhost:3000/products
+curl -X GET http://localhost:4000/products
 ```
 
 ### GET /products/:id
@@ -43,7 +43,7 @@ Retrieve a specific product by ID
 
 Example:
 ```bash
-curl -X GET http://localhost:3000/products/1
+curl -X GET http://localhost:4000/products/1
 ```
 
 ### POST /checkout
@@ -51,7 +51,7 @@ Create an order with payment processing
 
 Example:
 ```bash
-curl -X POST http://localhost:3000/checkout \
+curl -X POST http://localhost:4000/checkout \
   -H "Content-Type: application/json" \
   -d '{"productId": "1", "quantity": 2, "customerEmail": "user@example.com"}'
 ```
@@ -61,5 +61,5 @@ Health check endpoint
 
 Example:
 ```bash
-curl -X GET http://localhost:3000/health
+curl -X GET http://localhost:4000/health
 ```

@@ -69,7 +69,7 @@ make status
 # Or: docker-compose ps
 
 # Create an order
-curl -X POST http://localhost:3000/checkout \
+curl -X POST http://localhost:4000/checkout \
   -H "Content-Type: application/json" \
   -d '{"productId": "1", "quantity": 2, "customerEmail": "user@example.com"}'
 ```
