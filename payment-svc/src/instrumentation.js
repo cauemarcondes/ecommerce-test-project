@@ -2,8 +2,8 @@
 
 const { NodeSDK } = require('@opentelemetry/sdk-node');
 const { getNodeAutoInstrumentations } = require('@opentelemetry/auto-instrumentations-node');
-const { Resource } = require('@opentelemetry/resources');
-const { SemanticResourceAttributes } = require('@opentelemetry/semantic-conventions');
+const { resourceFromAttributes } = require('@opentelemetry/resources');
+const { ATTR_SERVICE_NAME, ATTR_SERVICE_VERSION } = require('@opentelemetry/semantic-conventions');
 const { OTLPTraceExporter } = require('@opentelemetry/exporter-trace-otlp-grpc');
 const { GrpcInstrumentation } = require('@opentelemetry/instrumentation-grpc');
 const { W3CTraceContextPropagator } = require('@opentelemetry/core');
@@ -21,9 +21,9 @@ const traceExporter = new OTLPTraceExporter({
 
 // Configure the SDK with the exporter and the custom resource attributes
 const sdk = new NodeSDK({
-  resource: new Resource({
-    [SemanticResourceAttributes.SERVICE_NAME]: serviceName,
-    [SemanticResourceAttributes.SERVICE_VERSION]: serviceVersion,
+  resource: resourceFromAttributes({
+    [ATTR_SERVICE_NAME]: serviceName,
+    [ATTR_SERVICE_VERSION]: serviceVersion,
     'deployment.environment': environment,
   }),
   traceExporter,
