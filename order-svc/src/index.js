@@ -10,6 +10,7 @@ const path = require('path');
 const grpc = require('@grpc/grpc-js');
 const protoLoader = require('@grpc/proto-loader');
 const pino = require('pino');
+const { startFaultPoller, expressMiddleware: faultMiddleware } = require('./fault-inject');
 
 // Configure environment variables
 const PORT = process.env.PORT || 8081;
@@ -17,6 +18,7 @@ const ELASTICSEARCH_URL = process.env.ELASTICSEARCH_URL || 'http://elasticsearch
 const RABBITMQ_URL = process.env.RABBITMQ_URL || 'amqp://rabbitmq:5672';
 const PAYMENT_SVC_URL = process.env.PAYMENT_SVC_URL || 'payment-svc:9000';
 
+const SERVICE_NAME = process.env.OTEL_SERVICE_NAME || 'order-svc';
 const tracer = trace.getTracer('order-svc');
 
 // Configure ECS-compatible JSON logger with trace context
@@ -29,7 +31,7 @@ const logger = pino({
   },
   base: {
     service: {
-      name: process.env.OTEL_SERVICE_NAME || 'order-svc',
+      name: SERVICE_NAME,
       version: process.env.SERVICE_VERSION || '0.1.0',
       environment: process.env.NODE_ENV || 'development'
     }
@@ -48,8 +50,14 @@ const logger = pino({
 });
 
 // Initialize Express app
+startFaultPoller({
+  serviceName: SERVICE_NAME,
+  url: process.env.CHAOS_UI_URL,
+});
+
 const app = express();
 app.use(express.json());
+app.use(faultMiddleware());
 
 // Initialize Elasticsearch client
 const esClient = new Client({

@@ -9,10 +9,10 @@ up:
 	docker compose up -d
 	@echo "Services starting. View status with 'make status'"
 
-# Stop all services and remove containers
+# Stop all services and remove containers (including chaos-ui)
 down:
-	@echo "Stopping mini-shop-otel services..."
-	docker compose down
+	@echo "Stopping mini-shop-otel services (including chaos-ui)..."
+	docker compose down --remove-orphans
 	@echo "Services stopped"
 
 # View status of all services
@@ -26,7 +26,7 @@ seed:
 # Clean volumes and dangling images
 clean:
 	@echo "Removing containers, volumes, and networks..."
-	docker compose down -v
+	docker compose down -v --remove-orphans
 	docker system prune -f
 	@echo "Cleanup complete"
 

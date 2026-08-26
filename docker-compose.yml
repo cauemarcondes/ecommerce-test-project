@@ -31,33 +31,81 @@ services:
     volumes:
       - rabbitmq-data:/var/lib/rabbitmq
 
-  # otel-collector:
-  #   image: otel/opentelemetry-collector-contrib:0.101.0
-  #   command: ["--config=/etc/otel-collector-config.yaml"]
-  #   volumes:
-  #     - ./otel-collector-config.yaml:/etc/otel-collector-config.yaml
-  #   ports:
-  #     - "4317:4317"  # OTLP gRPC
-  #     - "4318:4318"  # OTLP HTTP
-  #   depends_on:
-  #     elasticsearch:
-  #       condition: service_healthy
+  # Create (or reuse) an API key on host Elasticsearch before the collector starts.
+  # https://www.elastic.co/docs/api/doc/elasticsearch/operation/operation-security-create-api-key
+  create-api-key:
+    image: alpine:3.21
+    restart: "no"
+    user: "0:0"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./scripts/create-otel-api-key.sh:/scripts/create-otel-api-key.sh:ro
+      - otel-es-api-key:/secrets
+    environment:
+      - ELASTIC_ENDPOINT=${ELASTIC_ENDPOINT}
+      - ELASTIC_USERNAME=${ELASTIC_USERNAME:-elastic}
+      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD:-}
+      - ELASTIC_API_KEY=${ELASTIC_API_KEY:-}
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - apk add --no-cache curl >/dev/null && exec /bin/sh /scripts/create-otel-api-key.sh
+
+  # EDOT Collector: OTLP gateway to host Elasticsearch (not Compose elasticsearch on 7200).
+  otel-collector:
+    image: docker.elastic.co/elastic-agent/elastic-agent:9.5.1
+    container_name: otel-collector
+    restart: unless-stopped
+    user: "0:0"
+    entrypoint: ["/bin/bash", "/scripts/otel-collector-entrypoint.sh"]
+    volumes:
+      - ./otel-collector-config.yaml:/etc/otelcol-config.yml:ro
+      - ./scripts/otel-collector-entrypoint.sh:/scripts/otel-collector-entrypoint.sh:ro
+      - otel-es-api-key:/secrets:ro
+    ports:
+      - "4317:4317"  # OTLP gRPC
+      - "4318:4318"  # OTLP HTTP
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    environment:
+      - ELASTIC_AGENT_OTEL=true
+      - ELASTIC_ENDPOINT=${ELASTIC_ENDPOINT}
+      - STORAGE_DIR=/usr/share/elastic-agent
+    depends_on:
+      create-api-key:
+        condition: service_completed_successfully
+    deploy:
+      resources:
+        limits:
+          memory: 1.5G
 
   # Application services
+  chaos-ui:
+    build:
+      context: ./chaos-ui
+      dockerfile: Dockerfile
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+
   api-gateway:
     build:
       context: ./api-gateway
       dockerfile: Dockerfile
     environment:
       - PORT=4000
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4318
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
       - OTEL_SERVICE_NAME=api-gateway
       - SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
       - CATALOG_SVC_URL=http://catalog-svc:8080
       - ORDER_SVC_URL=http://order-svc:8081
+      - CHAOS_UI_URL=http://chaos-ui:3000
     ports:
       - "4000:4000"
     depends_on:
+      - chaos-ui
+      - otel-collector
       - catalog-svc
       - order-svc
     volumes:
@@ -70,13 +118,18 @@ services:
       dockerfile: Dockerfile
     environment:
       - PORT=8080
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_SERVICE_NAME=catalog-svc
       - SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
       - ELASTICSEARCH_URL=http://elasticsearch:9200
+      - CHAOS_UI_URL=http://chaos-ui:3000
     volumes:
       - ./catalog-svc:/app
     depends_on:
+      chaos-ui:
+        condition: service_started
+      otel-collector:
+        condition: service_started
       elasticsearch:
         condition: service_healthy
 
@@ -86,16 +139,21 @@ services:
       dockerfile: Dockerfile
     environment:
       - PORT=8081
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4318
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4318
       - OTEL_SERVICE_NAME=order-svc
       - SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
       - ELASTICSEARCH_URL=http://elasticsearch:9200
       - RABBITMQ_URL=amqp://rabbitmq:5672
       - PAYMENT_SVC_URL=payment-svc:9000
+      - CHAOS_UI_URL=http://chaos-ui:3000
     volumes:
       - ./order-svc:/app
       - /app/node_modules
     depends_on:
+      chaos-ui:
+        condition: service_started
+      otel-collector:
+        condition: service_started
       elasticsearch:
         condition: service_healthy
       rabbitmq:
@@ -107,25 +165,34 @@ services:
       dockerfile: Dockerfile
     environment:
       - PORT=9000
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_SERVICE_NAME=payment-svc
       - SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
+      - CHAOS_UI_URL=http://chaos-ui:3000
     volumes:
       - ./payment-svc:/app
+    depends_on:
+      - chaos-ui
+      - otel-collector
 
   email-worker:
     build:
       context: ./email-worker
       dockerfile: Dockerfile
     environment:
-      - OTEL_EXPORTER_OTLP_ENDPOINT=http://host.docker.internal:4317
+      - OTEL_EXPORTER_OTLP_ENDPOINT=http://otel-collector:4317
       - OTEL_SERVICE_NAME=email-worker
       - SERVICE_VERSION=${SERVICE_VERSION:-0.1.0}
       - ELASTICSEARCH_URL=http://elasticsearch:9200
       - RABBITMQ_URL=amqp://rabbitmq:5672
+      - CHAOS_UI_URL=http://chaos-ui:3000
     volumes:
       - ./email-worker:/app
     depends_on:
+      chaos-ui:
+        condition: service_started
+      otel-collector:
+        condition: service_started
       elasticsearch:
         condition: service_healthy
       rabbitmq:
@@ -134,3 +201,4 @@ services:
 volumes:
   es-data:
   rabbitmq-data:
+  otel-es-api-key:

@@ -8,6 +8,7 @@ const { Client } = require('@elastic/elasticsearch');
 const { trace, context, SpanStatusCode } = require('@opentelemetry/api');
 const pino = require('pino');
 const pinoHttp = require('pino-http');
+const { startFaultPoller, expressMiddleware: faultMiddleware } = require('./fault-inject');
 
 // Environment variables
 const PORT = process.env.PORT || 8080;
@@ -114,8 +115,14 @@ const sampleProducts = [
 ];
 
 // Initialize Express app
+startFaultPoller({
+  serviceName: SERVICE_NAME,
+  url: process.env.CHAOS_UI_URL,
+});
+
 const app = express();
 app.use(express.json());
+app.use(faultMiddleware());
 
 // Add request logging middleware
 app.use(pinoHttp({

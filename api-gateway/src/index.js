@@ -6,6 +6,8 @@ const express = require("express");
 const axios = require("axios");
 const pino = require("pino");
 
+const { startFaultPoller, expressMiddleware: faultMiddleware } = require("./fault-inject");
+
 const app = express();
 const PORT = process.env.PORT || 4000;
 const CATALOG_SVC_URL =
@@ -48,8 +50,14 @@ const logger = pino({
   },
 });
 
+startFaultPoller({
+  serviceName: SERVICE_NAME,
+  url: process.env.CHAOS_UI_URL,
+});
+
 // Middleware
 app.use(express.json());
+app.use(faultMiddleware());
 
 // Add trace context to all requests
 // app.use((req, res, next) => {

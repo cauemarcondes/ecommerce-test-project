@@ -1,0 +1,288 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Mini-shop service control</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        --bg: #10141c;
+        --card: #1a2130;
+        --border: #2c3648;
+        --text: #e8edf5;
+        --muted: #9aa8bc;
+        --accent: #3d8bfd;
+        --down: #e85d4c;
+        --ok: #3ecf8e;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+        background: var(--bg);
+        color: var(--text);
+      }
+      header { padding: 1.5rem 1.5rem 0.75rem; }
+      h1 { margin: 0 0 0.35rem; font-size: 1.4rem; }
+      header > p { margin: 0; color: var(--muted); font-size: 0.95rem; }
+      .toolbar {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 0.5rem;
+        align-items: center;
+        padding: 0 1.5rem 0.5rem;
+      }
+      button, select {
+        font: inherit;
+        color: var(--text);
+        background: #243044;
+        border: 1px solid var(--border);
+        border-radius: 8px;
+        padding: 0.4rem 0.7rem;
+      }
+      button:hover, select:hover { border-color: var(--accent); cursor: pointer; }
+      button.reset { background: #3a2430; border-color: #6b3340; }
+      .hint {
+        color: var(--down);
+        font-size: 0.85rem;
+        padding: 0 1.5rem 0.5rem;
+      }
+      .grid {
+        display: grid;
+        gap: 1rem;
+        padding: 1rem 1.25rem 1.5rem;
+        grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      }
+      .card {
+        background: var(--card);
+        border: 1px solid var(--border);
+        border-radius: 12px;
+        padding: 1rem 1.1rem 1.15rem;
+      }
+      .card h2 {
+        margin: 0 0 0.75rem;
+        font-size: 1.05rem;
+        display: flex;
+        justify-content: space-between;
+        align-items: center;
+        gap: 0.5rem;
+      }
+      .badge {
+        font-size: 0.72rem;
+        font-weight: 600;
+        letter-spacing: 0.04em;
+        text-transform: uppercase;
+        padding: 0.2rem 0.45rem;
+        border-radius: 999px;
+        white-space: nowrap;
+      }
+      .badge.ok {
+        background: color-mix(in srgb, var(--ok) 20%, transparent);
+        color: var(--ok);
+      }
+      .badge.down {
+        background: color-mix(in srgb, var(--down) 22%, transparent);
+        color: var(--down);
+      }
+      .row {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 0.75rem;
+        margin-bottom: 0.75rem;
+      }
+      label { font-size: 0.9rem; }
+      input[type="checkbox"] {
+        width: 1.15rem;
+        height: 1.15rem;
+        accent-color: var(--down);
+      }
+      input[type="range"] { width: 100%; accent-color: var(--accent); }
+      .metric {
+        display: flex;
+        justify-content: space-between;
+        font-size: 0.85rem;
+        color: var(--muted);
+        margin-bottom: 0.35rem;
+      }
+      .field { margin-bottom: 0.75rem; }
+      .field label {
+        display: block;
+        margin-bottom: 0.3rem;
+        color: var(--muted);
+        font-size: 0.8rem;
+      }
+      .field select { width: 100%; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>Service control</h1>
+      <p>
+        Inject hangs, latency, and errors. Processes stay up so traces still export.
+      </p>
+    </header>
+    <div class="toolbar" id="toolbar"></div>
+    <div class="hint" id="hint"></div>
+    <main class="grid" id="cards"></main>
+    <script>
+      const cards = document.getElementById("cards");
+      const toolbar = document.getElementById("toolbar");
+      const hintEl = document.getElementById("hint");
+      let operations = {};
+      let scenarios = {};
+      let statusCodes = [429, 500, 503, 504];
+
+      function badge(fault) {
+        if (fault.down) return '<span class="badge down">Down</span>';
+        if (fault.errorRate > 0)
+          return `<span class="badge down">${fault.errorRate}% ${fault.statusCode}</span>`;
+        if (fault.delayMs > 0)
+          return `<span class="badge ok">${fault.delayMs} ms</span>`;
+        return '<span class="badge ok">Running</span>';
+      }
+
+      function readCard(name) {
+        return {
+          down: document.getElementById(`down-${name}`).checked,
+          delayMs: Number(document.getElementById(`delay-${name}`).value),
+          errorRate: Number(document.getElementById(`error-${name}`).value),
+          statusCode: Number(document.getElementById(`status-${name}`).value),
+          failOperation: document.getElementById(`op-${name}`).value,
+        };
+      }
+
+      function renderHint(faults) {
+        hintEl.textContent =
+          faults["order-svc"]?.down && faults["payment-svc"]?.down
+            ? "order-svc is down, so payment-svc will not receive Charge calls."
+            : "";
+      }
+
+      function renderToolbar() {
+        const buttons = Object.entries(scenarios)
+          .map(
+            ([id, s]) =>
+              `<button type="button" data-scenario="${id}" title="${s.description}">${s.label}</button>`
+          )
+          .join("");
+        toolbar.innerHTML =
+          buttons + '<button type="button" class="reset" id="reset-all">Reset all</button>';
+        toolbar.querySelectorAll("[data-scenario]").forEach((btn) => {
+          btn.addEventListener("click", () => applyScenario(btn.dataset.scenario));
+        });
+        document.getElementById("reset-all").addEventListener("click", resetAll);
+      }
+
+      function render(faults) {
+        renderHint(faults);
+        cards.innerHTML = Object.entries(faults)
+          .map(([name, fault]) => {
+            const ops = operations[name] || ["all"];
+            const opOptions = ops
+              .map(
+                (op) =>
+                  `<option value="${op}" ${fault.failOperation === op ? "selected" : ""}>${op}</option>`
+              )
+              .join("");
+            const statusOptions = statusCodes
+              .map(
+                (code) =>
+                  `<option value="${code}" ${Number(fault.statusCode) === code ? "selected" : ""}>${code}</option>`
+              )
+              .join("");
+            return `
+          <article class="card" data-service="${name}">
+            <h2><span>${name}</span>${badge(fault)}</h2>
+            <div class="row">
+              <label for="down-${name}">Unresponsive</label>
+              <input id="down-${name}" type="checkbox" ${fault.down ? "checked" : ""} />
+            </div>
+            <div class="field">
+              <label for="op-${name}">Fail only this operation</label>
+              <select id="op-${name}">${opOptions}</select>
+            </div>
+            <div class="metric">
+              <span>Added latency</span>
+              <span id="delay-label-${name}">${fault.delayMs} ms</span>
+            </div>
+            <input id="delay-${name}" type="range" min="0" max="5000" step="50" value="${fault.delayMs}" />
+            <div class="metric" style="margin-top:0.75rem">
+              <span>Error rate</span>
+              <span id="error-label-${name}">${fault.errorRate}%</span>
+            </div>
+            <input id="error-${name}" type="range" min="0" max="100" step="5" value="${fault.errorRate}" />
+            <div class="field" style="margin-top:0.75rem">
+              <label for="status-${name}">Error status</label>
+              <select id="status-${name}">${statusOptions}</select>
+            </div>
+          </article>`;
+          })
+          .join("");
+
+        for (const name of Object.keys(faults)) {
+          const delay = document.getElementById(`delay-${name}`);
+          const error = document.getElementById(`error-${name}`);
+          document.getElementById(`down-${name}`).addEventListener("change", () =>
+            putFaults(name, readCard(name))
+          );
+          document.getElementById(`op-${name}`).addEventListener("change", () =>
+            putFaults(name, readCard(name))
+          );
+          document.getElementById(`status-${name}`).addEventListener("change", () =>
+            putFaults(name, readCard(name))
+          );
+          delay.addEventListener("input", () => {
+            document.getElementById(`delay-label-${name}`).textContent = `${delay.value} ms`;
+          });
+          delay.addEventListener("change", () => putFaults(name, readCard(name)));
+          error.addEventListener("input", () => {
+            document.getElementById(`error-label-${name}`).textContent = `${error.value}%`;
+          });
+          error.addEventListener("change", () => putFaults(name, readCard(name)));
+        }
+      }
+
+      async function putFaults(service, body) {
+        await fetch(`/api/faults/${encodeURIComponent(service)}`, {
+          method: "PUT",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        });
+        await refresh();
+      }
+
+      async function applyScenario(id) {
+        await fetch(`/api/scenarios/${encodeURIComponent(id)}`, { method: "POST" });
+        await refresh();
+      }
+
+      async function resetAll() {
+        await fetch("/api/faults/reset", { method: "POST" });
+        await refresh();
+      }
+
+      async function refresh() {
+        const active = document.activeElement;
+        if (active && (active.tagName === "INPUT" || active.tagName === "SELECT")) {
+          return;
+        }
+        const res = await fetch("/api/faults");
+        render(await res.json());
+      }
+
+      async function init() {
+        const meta = await (await fetch("/api/meta")).json();
+        operations = meta.operations || {};
+        scenarios = meta.scenarios || {};
+        statusCodes = meta.statusCodes || statusCodes;
+        renderToolbar();
+        await refresh();
+        setInterval(refresh, 2000);
+      }
+
+      init();
+    </script>
+  </body>
+</html>

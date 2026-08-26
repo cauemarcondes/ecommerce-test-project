@@ -14,6 +14,7 @@ const {
   SpanKind,
 } = require("@opentelemetry/api");
 const pino = require("pino");
+const { startFaultPoller, applyFaults } = require("./fault-inject");
 
 // Environment variables
 const RABBITMQ_URL = process.env.RABBITMQ_URL || "amqp://rabbitmq:5672";
@@ -399,6 +400,15 @@ async function startConsumer() {
   // Start consuming messages
   await channel.consume(queue.queue, async (msg) => {
     if (msg) {
+      try {
+        await applyFaults({ operation: "consume" });
+      } catch (err) {
+        if (err && err.chaos) {
+          channel.nack(msg, false, false);
+          return;
+        }
+        throw err;
+      }
       // Extract tracing headers if present
       const headers = msg.properties.headers || {};
       const traceparent = headers.traceparent;
@@ -490,6 +500,10 @@ async function startConsumer() {
 // Start the worker
 async function main() {
   try {
+    startFaultPoller({
+      serviceName: SERVICE_NAME,
+      url: process.env.CHAOS_UI_URL,
+    });
     await startConsumer();
   } catch (err) {
     logger.fatal({

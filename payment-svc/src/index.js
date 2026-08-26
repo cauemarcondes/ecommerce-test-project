@@ -9,6 +9,7 @@ const protoLoader = require('@grpc/proto-loader');
 const { v4: uuidv4 } = require('uuid');
 const { trace, context, SpanStatusCode } = require('@opentelemetry/api');
 const pino = require('pino');
+const { startFaultPoller, applyFaults } = require('./fault-inject');
 
 // Constants for payment status
 const STATUS = {
@@ -282,9 +283,22 @@ async function processPaymentWithRetry(call) {
 const paymentService = {
   charge: async (call, callback) => {
     try {
+      await applyFaults({ operation: 'Charge', method: 'Charge', path: 'Charge' });
       const result = await processPaymentWithRetry(call);
       callback(null, result);
     } catch (error) {
+      if (error && error.chaos) {
+        const grpcCode = {
+          429: grpc.status.RESOURCE_EXHAUSTED,
+          500: grpc.status.INTERNAL,
+          503: grpc.status.UNAVAILABLE,
+          504: grpc.status.DEADLINE_EXCEEDED,
+        }[error.statusCode] || grpc.status.INTERNAL;
+        return callback({
+          code: grpcCode,
+          message: error.message,
+        });
+      }
       logger.error({
         message: 'Error processing payment charge',
         error: { message: error.message }
@@ -340,4 +354,8 @@ function startServer() {
 }
 
 // Start the server
+startFaultPoller({
+  serviceName: SERVICE_NAME,
+  url: process.env.CHAOS_UI_URL,
+});
 startServer();
